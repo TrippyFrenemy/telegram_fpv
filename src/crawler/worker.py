@@ -1,0 +1,141 @@
+import asyncio
+from datetime import datetime
+from typing import Iterable
+from pyrogram.enums import MessageMediaType
+from pyrogram.errors import FloodWait
+
+from src.crawler.checkpoints import get_last_message_id, set_last_message_id
+from src.tg_client.client import client
+from src.db.session import SessionLocal
+from src.db.models import Channel, Message, Media, Edge, DeadLetter
+from src.extractors.media import ffprobe_info
+from src.store.storage import put
+from src.filters.fpv import score
+from src.logger import log
+from src.config import settings
+from src.tg_client.limits import RateLimiter
+
+
+VIDEO_MEDIA = {MessageMediaType.VIDEO, MessageMediaType.DOCUMENT}
+VIDEO_EXT = {"mp4", "mov", "mkv"}
+
+
+async def crawl_channel(username_or_id: str | int, since_id: int | None = None, backfill_since: datetime | None = None):
+    async with client:
+        async for m in client.get_chat_history(username_or_id, offset_id=0):
+            if since_id and m.id <= since_id:
+                break
+            if backfill_since and m.date < backfill_since:
+                break
+            await handle_message(username_or_id, m)
+
+
+async def handle_message(channel, m):
+    db = SessionLocal()
+    try:
+        # ensure channel rows exist
+        def ensure_channel(chat):
+            ch = db.get(Channel, chat.id)
+            if not ch:
+                ch = Channel(
+                    id=chat.id,
+                    username=getattr(chat, "username", None),
+                    title=getattr(chat, "title", None),
+                )
+            else:
+                ch.username = getattr(chat, "username", ch.username)
+                ch.title = getattr(chat, "title", ch.title)
+            ch.last_scanned_id = m.id
+            ch.last_scanned_at = datetime.now()
+            db.add(ch)
+
+        ensure_channel(m.chat)
+
+        is_fwd = bool(m.forward_from_chat)
+        fwd_src_id = m.forward_from_chat.id if m.forward_from_chat else None
+        if is_fwd and fwd_src_id:
+            ensure_channel(m.forward_from_chat)
+            db.flush()
+            db.add(Edge(src_channel_id=fwd_src_id, dst_channel_id=m.chat.id))
+
+        text = m.caption or m.text or ""
+        has_media = m.media in VIDEO_MEDIA
+
+        msg = Message(
+            channel_id=m.chat.id,
+            message_id=m.id,
+            date=m.date,
+            has_media=has_media,
+            is_fwd=is_fwd,
+            fwd_src_channel_id=fwd_src_id,
+            text_hash=str(hash(text)) if text else None,
+            lang=None,
+        )
+        db.add(msg)
+        db.flush()
+
+        if not has_media:
+            db.commit()
+            log.info("message", channel=channel, mid=m.id)
+            return
+
+        # ----- Stage 0: фільтр без завантаження -----
+        file_name = None
+        duration = None
+        width = height = None
+
+        if m.video:
+            file_name = m.video.file_name
+            duration = getattr(m.video, "duration", None)
+            width = getattr(m.video, "width", None)
+            height = getattr(m.video, "height", None)
+        elif m.document:
+            file_name = m.document.file_name  # інколи відео приходить як document
+
+        ext = (file_name.rsplit(".", 1)[-1].lower() if file_name and "." in file_name else None)
+        if ext not in VIDEO_EXT:
+            db.commit()
+            return
+
+        prelim = score(text=text, duration_s=duration, width=width, height=height)
+        if prelim.confidence < settings.fpv_min_confidence:
+            db.commit()
+            return
+
+        # ----- Stage 1: завантаження + точні метадані -----
+        file = await m.download(in_memory=True)
+        data = file.getbuffer()
+        stored = put(data, channel=m.chat.username or m.chat.id, when=m.date, ext=ext)
+
+        info = ffprobe_info(str(file.name))
+        dec = score(
+            text=text,
+            duration_s=info.duration_s or duration,
+            width=info.width or width,
+            height=info.height or height,
+        )
+
+        db.add(Media(
+            sha256=stored.sha256,
+            message_pk=msg.id,
+            mime=info.mime,
+            size=info.size,
+            duration_s=info.duration_s,
+            width=info.width,
+            height=info.height,
+            s3_path=stored.relpath,
+            fpv_confidence=dec.confidence,
+        ))
+
+        db.commit()
+        log.info("message", channel=channel, mid=m.id)
+    except FloodWait as fw:
+        log.warning("flood_wait", seconds=fw.value)
+        await asyncio.sleep(fw.value)
+    except Exception as e:
+        log.error("dead_letter", err=str(e))
+        db.rollback()
+        db.add(DeadLetter(channel_id=m.chat.id, message_id=m.id, error=str(e)))
+        db.commit()
+    finally:
+        db.close()

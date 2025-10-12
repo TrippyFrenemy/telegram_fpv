@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram_fpv"
+version = "0.1.0"
+description = "Incremental FPV video crawler for Telegram (MTProto)"
+readme = "README.md"
+authors = [
+    { name = "Dmytro Avrushchenko", email = "trippyfren@gmail.com" }
+]
+requires-python = ">=3.12"
+
+dependencies = [
+    "pyrogram==2.0.106",
+    "TgCrypto==1.2.5",
+    "SQLAlchemy==2.0.36",
+    "psycopg2-binary==2.9.10",
+    "pydantic-settings==2.6.1",
+    "structlog==24.4.0",
+    "loguru==0.7.2",
+    "APScheduler==3.10.4",
+    "minio==7.2.10",
+    "boto3==1.35.36",
+    "pandas==2.2.3",
+    "pyarrow==17.0.0",
+    "fastparquet==2024.5.0",
+    "rapidfuzz==3.9.7",
+    "python-magic==0.4.27",
+    "ffmpeg-python==0.2.0",
+]
+
+[project.scripts]
+tg-ds = "cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]

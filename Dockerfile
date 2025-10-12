@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim
+
+ENV PYTHONPATH=/app \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1
+
+# Runtime deps for ffmpeg-python и python-magic
+RUN apt-get update && apt-get install -y \
+    build-essential libpq-dev \
+    ffmpeg libmagic1 && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Встановлення залежностей
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --no-deps .
+
+# Нерутовий користувач
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+# За замовчуванням запускаємо допоміжну команду
+CMD ["python3", "-m", "src.cli.main", "init"]
