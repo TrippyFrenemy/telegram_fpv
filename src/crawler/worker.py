@@ -3,6 +3,8 @@ from datetime import datetime
 from typing import Iterable
 from pyrogram.enums import MessageMediaType
 from pyrogram.errors import FloodWait
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from src.crawler.checkpoints import get_last_message_id, set_last_message_id
 from src.tg_client.client import client
@@ -20,7 +22,19 @@ VIDEO_MEDIA = {MessageMediaType.VIDEO, MessageMediaType.DOCUMENT}
 VIDEO_EXT = {"mp4", "mov", "mkv"}
 
 
-async def crawl_channel(username_or_id: str | int, since_id: int | None = None, backfill_since: datetime | None = None):
+async def crawl_channel(username_or_id: str | int, mode: str = "backfill", since_id: int | None = None, backfill_since: datetime | None = None):
+    since_id = None
+    db = SessionLocal()
+    try:
+        if isinstance(username_or_id, str):
+            ch = db.execute(select(Channel).where(Channel.username == username_or_id)).scalar_one_or_none()
+        else:
+            ch = db.get(Channel, int(username_or_id))
+        if ch and mode in ("latest", "resume"):
+            since_id = ch.last_scanned_id
+    finally:
+        db.close()
+
     async with client:
         async for m in client.get_chat_history(username_or_id, offset_id=0):
             if since_id and m.id <= since_id:
@@ -61,18 +75,39 @@ async def handle_message(channel, m):
         text = m.caption or m.text or ""
         has_media = m.media in VIDEO_MEDIA
 
-        msg = Message(
-            channel_id=m.chat.id,
-            message_id=m.id,
-            date=m.date,
-            has_media=has_media,
-            is_fwd=is_fwd,
-            fwd_src_channel_id=fwd_src_id,
-            text_hash=str(hash(text)) if text else None,
-            lang=None,
-        )
-        db.add(msg)
-        db.flush()
+        # спроба знайти існуюче повідомлення
+        existing_msg = db.execute(
+            select(Message).where(
+                Message.channel_id == m.chat.id,
+                Message.message_id == m.id
+            )
+        ).scalar_one_or_none()
+
+        # якщо повідомлення є, перевіряємо чи є в ньому медіа
+        if existing_msg:
+            already = db.execute(
+                select(Media).where(Media.message_pk == existing_msg.id)
+            ).first()
+            if already:
+                db.close()
+                return
+
+        # створюємо нове повідомлення, якщо не знайшли
+        if existing_msg:
+            msg = existing_msg
+        else:
+            msg = Message(
+                channel_id=m.chat.id,
+                message_id=m.id,
+                date=m.date,
+                has_media=has_media,
+                is_fwd=bool(m.forward_from_chat),
+                fwd_src_channel_id=(m.forward_from_chat.id if m.forward_from_chat else None),
+                text_hash=str(hash(m.caption or m.text or "")) if (m.caption or m.text) else None,
+                lang=None,
+            )
+            db.add(msg)
+            db.flush()
 
         if not has_media:
             db.commit()
@@ -89,9 +124,21 @@ async def handle_message(channel, m):
             duration = getattr(m.video, "duration", None)
             width = getattr(m.video, "width", None)
             height = getattr(m.video, "height", None)
+            tg_uid = getattr(m.video, "file_unique_id", None)
         elif m.document:
             file_name = m.document.file_name  # інколи відео приходить як document
+            tg_uid = getattr(m.document, "file_unique_id", None)
 
+        # якщо UID є, пропускаємо дублікат по ньому
+        if tg_uid:
+            hit = db.execute(
+                select(Media).where(Media.tg_file_unique_id == tg_uid)
+            ).scalar_one_or_none()
+            if hit:
+                db.commit()
+                log.info("dup_skip", channel=channel, mid=m.id)
+                return
+            
         ext = (file_name.rsplit(".", 1)[-1].lower() if file_name and "." in file_name else None)
         if ext not in VIDEO_EXT:
             db.commit()
@@ -115,18 +162,27 @@ async def handle_message(channel, m):
             height=info.height or height,
         )
 
-        db.add(Media(
-            sha256=stored.sha256,
-            message_pk=msg.id,
-            mime=info.mime,
-            size=info.size,
-            duration_s=info.duration_s,
-            width=info.width,
-            height=info.height,
-            s3_path=stored.relpath,
-            fpv_confidence=dec.confidence,
-        ))
-
+        existing = db.get(Media, stored.sha256)
+        if not existing:
+            try:
+                db.add(Media(
+                    sha256=stored.sha256,
+                    message_pk=msg.id,
+                    tg_file_unique_id=tg_uid,
+                    mime=info.mime,
+                    size=info.size,
+                    duration_s=info.duration_s,
+                    width=info.width,
+                    height=info.height,
+                    s3_path=stored.relpath,
+                    fpv_confidence=dec.confidence,
+                ))
+                db.commit()
+            except IntegrityError:
+                db.rollback()  # другой воркер успел вставить — игнорируем
+        else:
+            # дубликат контента — ничего не вставляем в media
+            pass
         db.commit()
         log.info("message", channel=channel, mid=m.id)
     except FloodWait as fw:

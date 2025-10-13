@@ -29,9 +29,16 @@ def put(data: bytes, channel: str | int, when: datetime, ext: str) -> StoredObje
     sha = sha256_bytes(data)
     rel = build_path(channel, when, sha, ext)
     if settings.storage_backend == "s3":
-        s3.put_object(settings.s3_bucket, rel, io.BytesIO(data), length=len(data))
+        try:
+            s3.stat_object(settings.s3_bucket, rel)
+            exists = True
+        except Exception:
+            exists = False
+        if not exists:
+            s3.put_object(settings.s3_bucket, rel, io.BytesIO(data), length=len(data))
     else:
         dst = fs_root / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes(data)
+        if not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(data)
     return StoredObject(sha, rel)

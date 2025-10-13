@@ -44,6 +44,7 @@ class Media(Base):
     __tablename__ = "media"
     sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
     message_pk: Mapped[int] = mapped_column(Integer, ForeignKey("messages.id"))
+    tg_file_unique_id: Mapped[str | None] = mapped_column(String(64))  # NEW
     mime: Mapped[str | None] = mapped_column(String(128))
     size: Mapped[int | None] = mapped_column(BigInteger)
     duration_s: Mapped[float | None] = mapped_column(Float)

@@ -11,6 +11,10 @@ SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
 def init_db():
     Base.metadata.create_all(bind=_engine)
     with _engine.begin() as conn:
+        conn.execute(text("ALTER TABLE media ADD COLUMN IF NOT EXISTS tg_file_unique_id VARCHAR(64)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS uq_messages_channel_mid ON messages(channel_id, message_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS uq_edges_unique ON edges(src_channel_id, dst_channel_id, kind)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS uq_media_tg_uid ON media(tg_file_unique_id)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_messages_channel_mid ON messages(channel_id, message_id)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_media_message_pk ON media(message_pk)"))
     

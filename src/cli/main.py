@@ -43,7 +43,7 @@ def add_seeds(file: Path = typer.Option(..., exists=True)):
 
 
 @app.command("crawl")
-def crawl(mode: str = typer.Option("backfill", help="latest|backfill|resume"),
+def crawl(mode: str = typer.Option("backfill", help="latest|backfill"),
           since: str | None = None):
     async def run():
         seeds = [s.strip() for s in Path("seeds.txt").read_text(encoding="utf-8").splitlines() if s.strip()]
@@ -52,7 +52,7 @@ def crawl(mode: str = typer.Option("backfill", help="latest|backfill|resume"),
             backfill_since = datetime.fromisoformat(since) if since else datetime.fromisoformat(settings.crawl_backfill_since)
 
         for seed in seeds:
-            await crawl_channel(seed, backfill_since=backfill_since)
+            await crawl_channel(seed, mode=mode, backfill_since=backfill_since)
 
     asyncio.run(run())
 
