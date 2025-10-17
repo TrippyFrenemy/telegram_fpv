@@ -1,3 +1,7 @@
+import os
+import shutil
+import subprocess
+import tempfile
 import asyncio
 from datetime import datetime
 from typing import Iterable
@@ -11,13 +15,16 @@ from src.tg_client.client import client
 from src.db.session import SessionLocal
 from src.db.models import Channel, Message, Media, Edge, DeadLetter
 from src.extractors.media import ffprobe_info
-from src.store.storage import put
+from src.store.storage import put, sha256_bytes
 from src.filters.fpv import score
 from src.logger import log
 from src.config import settings
 from src.tg_client.limits import RateLimiter
+from src.utils.split_existing_videos import split_and_upload
+from src.store.s3 import client as s3
 
-
+HAS_GPU = shutil.which("nvidia-smi") is not None
+print("GPU acceleration is", "enabled" if HAS_GPU else "disabled")
 VIDEO_MEDIA = {MessageMediaType.VIDEO, MessageMediaType.DOCUMENT}
 VIDEO_EXT = {"mp4", "mov", "mkv"}
 
@@ -152,8 +159,48 @@ async def handle_message(channel, m):
         # ----- Stage 1: завантаження + точні метадані -----
         file = await m.download(in_memory=True)
         data = file.getbuffer()
+
+        fd_in, tmp_in = tempfile.mkstemp(suffix=f".{ext}")
+        os.close(fd_in)
+        with open(tmp_in, "wb") as f:
+            f.write(data)
+
+        tmp_out = tmp_in + "_compressed.mp4"
+
+        try:
+            # швидке кодування без втрати видимої якості
+            if HAS_GPU:
+                codec = "h264_nvenc"
+                preset = "fast"
+            else:
+                codec = "libx264"
+                preset = "ultrafast"
+
+            subprocess.run([
+                "ffmpeg", "-y", "-i", tmp_in,
+                "-c:v", codec, "-preset", preset,
+                "-crf", "23", "-movflags", "+faststart",
+                "-c:a", "aac", "-b:a", "128k",
+                tmp_out
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+            with open(tmp_out, "rb") as f:
+                data = f.read()
+            ext = "mp4"
+
+        except subprocess.CalledProcessError:
+            pass
+        finally:
+            for p in (tmp_in, tmp_out):
+                try:
+                    os.remove(p)
+                except FileNotFoundError:
+                    pass
+
+        # --- Завантаження в S3 або FS ---
         stored = put(data, channel=m.chat.username or m.chat.id, when=m.date, ext=ext)
 
+        # --- Витяг метаданих після компресії ---
         info = ffprobe_info(str(file.name))
         dec = score(
             text=text,
@@ -179,12 +226,19 @@ async def handle_message(channel, m):
                 ))
                 db.commit()
             except IntegrityError:
-                db.rollback()  # другой воркер успел вставить — игнорируем
+                db.rollback()  # інший воркер міг вже вставити
         else:
             # дубликат контента — ничего не вставляем в media
             pass
         db.commit()
         log.info("message", channel=channel, mid=m.id)
+
+        # # ----- Stage 2: сегментація -----
+        # try:
+        #     threading.Thread(target=split_and_upload, args=(stored.relpath,), daemon=True).start()
+        # except Exception as e:
+        #     log.error("segmentation_failed", err=str(e))
+
     except FloodWait as fw:
         log.warning("flood_wait", seconds=fw.value)
         await asyncio.sleep(fw.value)

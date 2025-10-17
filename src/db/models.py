@@ -52,6 +52,7 @@ class Media(Base):
     height: Mapped[int | None] = mapped_column(Integer)
     s3_path: Mapped[str | None] = mapped_column(String(512))
     fpv_confidence: Mapped[float | None] = mapped_column(Float)
+    is_segment: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Run(Base):
@@ -71,3 +72,12 @@ class DeadLetter(Base):
     error: Mapped[str] = mapped_column(String(1024))
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     retries: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Label(Base):
+    __tablename__ = "labels"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer)
+    segment_path: Mapped[str] = mapped_column(String(512))  # шлях у S3 до сегмента
+    decision: Mapped[int] = mapped_column(Integer)  # 1 = підходить, 0 = ні
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

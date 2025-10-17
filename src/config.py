@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     tg_rps: int = Field(alias="TG_RPS", default=20)
     tg_rps_burst: int = Field(alias="TG_RPS_BURST", default=30)
     tg_sleep_jitter_ms: int = Field(alias="TG_SLEEP_JITTER_MS", default=250)
+    tg_bot_token: str = Field(alias="TG_BOT_TOKEN")
 
     db_dsn: str = Field(alias="DB_DSN", default="sqlite:///./fpv.db")
 
@@ -23,6 +24,7 @@ class Settings(BaseSettings):
     s3_bucket: str | None = Field(alias="S3_BUCKET", default=None)
     s3_region: str | None = Field(alias="S3_REGION", default="us-east-1")
     s3_secure: bool = Field(alias="S3_SECURE", default=False)
+    redis_dsn: str = Field(alias="REDIS_DSN", default="redis://localhost:6379/0")
 
     fs_root: Path = Field(alias="FS_ROOT", default=Path("./data"))
 

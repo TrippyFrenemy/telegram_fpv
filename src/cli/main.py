@@ -11,6 +11,7 @@ from src.reports.export import export_manifest
 from src.reports.stats import daily_stats
 from src.tg_client.client import client
 from src.crawler.worker import crawl_channel
+from src.utils.split_existing_videos import process_s3
 
 
 app = typer.Typer(add_help_option=True)
@@ -55,6 +56,10 @@ def crawl(mode: str = typer.Option("backfill", help="latest|backfill"),
             await crawl_channel(seed, mode=mode, backfill_since=backfill_since)
 
     asyncio.run(run())
+
+@app.command("labeling")
+def labeling():
+    process_s3()
 
 
 @app.command("resume")
