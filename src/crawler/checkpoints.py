@@ -7,10 +7,14 @@ def get_last_message_id(db: Session, channel_id: int) -> int | None:
     return ch.last_scanned_id if ch else None
 
 
-def set_last_message_id(db: Session, channel_id: int, last_id: int):
-    ch = db.get(Channel, channel_id)
-    if not ch:
-        ch = Channel(id=channel_id)
-    ch.last_scanned_id = last_id
-    db.add(ch)
+def set_last_message_id(db: Session, channel_id: str | int, last_id: int):
+    ch = db.get(Channel, int(channel_id))
+    if ch:
+        ch.last_scanned_id = last_id
+    else:
+        ch = Channel(
+            id=int(channel_id),
+            last_scanned_id=last_id,
+        )
+    db.merge(ch)
     db.commit()

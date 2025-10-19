@@ -46,6 +46,7 @@ def process_s3():
                 s3.fput_object(settings.s3_bucket, dst_key, seg)
                 os.remove(seg)
                 print(f"[uploaded] {dst_key}")
+            s3.remove_object(settings.s3_bucket, obj.object_name)
         except S3Error as e:
             print("skip:", e)
         finally:

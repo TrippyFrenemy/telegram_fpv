@@ -77,7 +77,7 @@ class DeadLetter(Base):
 class Label(Base):
     __tablename__ = "labels"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(Integer)
+    user_id: Mapped[int] = mapped_column(BigInteger)  # TG user ID
     segment_path: Mapped[str] = mapped_column(String(512))  # шлях у S3 до сегмента
     decision: Mapped[int] = mapped_column(Integer)  # 1 = підходить, 0 = ні
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

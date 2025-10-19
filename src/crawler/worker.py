@@ -10,6 +10,7 @@ from pyrogram.errors import FloodWait
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from src.extractors.encode import transcode
 from src.crawler.checkpoints import get_last_message_id, set_last_message_id
 from src.tg_client.client import client
 from src.db.session import SessionLocal
@@ -29,26 +30,34 @@ VIDEO_MEDIA = {MessageMediaType.VIDEO, MessageMediaType.DOCUMENT}
 VIDEO_EXT = {"mp4", "mov", "mkv"}
 
 
-async def crawl_channel(username_or_id: str | int, mode: str = "backfill", since_id: int | None = None, backfill_since: datetime | None = None):
-    since_id = None
+async def crawl_channel(username_or_id: str | int, mode: str = "backfill", backfill_since: datetime | None = None):
     db = SessionLocal()
     try:
         if isinstance(username_or_id, str):
             ch = db.execute(select(Channel).where(Channel.username == username_or_id)).scalar_one_or_none()
         else:
             ch = db.get(Channel, int(username_or_id))
-        if ch and mode in ("latest", "resume"):
-            since_id = ch.last_scanned_id
     finally:
         db.close()
 
+    last_id = get_last_message_id(db=db, channel_id=ch.id) if ch else None
+    log.info("crawl_start", channel=username_or_id, last_id=last_id)
+
     async with client:
+        # 1. --- Обробка нових повідомлень (latest)
         async for m in client.get_chat_history(username_or_id, offset_id=0):
-            if since_id and m.id <= since_id:
-                break
-            if backfill_since and m.date < backfill_since:
+            if last_id and m.id <= last_id:
                 break
             await handle_message(username_or_id, m)
+            set_last_message_id(db, ch.id, m.id)
+
+        # 2. --- Переходимо у backfill (старіші)
+        if mode == "backfill":
+            async for m in client.get_chat_history(ch.id, offset_id=last_id or 0):
+                if backfill_since and m.date < backfill_since:
+                    break
+                await handle_message(username_or_id, m)
+                set_last_message_id(db, ch.id, m.id)
 
 
 async def handle_message(channel, m):
@@ -97,6 +106,7 @@ async def handle_message(channel, m):
             ).first()
             if already:
                 db.close()
+                log.info("skip_media_exist", channel=channel, mid=m.id)
                 return
 
         # створюємо нове повідомлення, якщо не знайшли
@@ -135,6 +145,8 @@ async def handle_message(channel, m):
         elif m.document:
             file_name = m.document.file_name  # інколи відео приходить як document
             tg_uid = getattr(m.document, "file_unique_id", None)
+        else:
+            log.info("skip_no_media", channel=channel, mid=m.id)
 
         # якщо UID є, пропускаємо дублікат по ньому
         if tg_uid:
@@ -149,11 +161,18 @@ async def handle_message(channel, m):
         ext = (file_name.rsplit(".", 1)[-1].lower() if file_name and "." in file_name else None)
         if ext not in VIDEO_EXT:
             db.commit()
+            log.info("skip_bad_ext", channel=channel, mid=m.id, mime=ext)
             return
 
         prelim = score(text=text, duration_s=duration, width=width, height=height)
         if prelim.confidence < settings.fpv_min_confidence:
             db.commit()
+            log.info(
+                "skip_fpv_conf",
+                channel=channel,
+                mid=m.id,
+                conf=prelim.confidence,
+            )
             return
 
         # ----- Stage 1: завантаження + точні метадані -----
@@ -187,7 +206,6 @@ async def handle_message(channel, m):
             with open(tmp_out, "rb") as f:
                 data = f.read()
             ext = "mp4"
-
         except subprocess.CalledProcessError:
             pass
         finally:
@@ -229,7 +247,7 @@ async def handle_message(channel, m):
                 db.rollback()  # інший воркер міг вже вставити
         else:
             # дубликат контента — ничего не вставляем в media
-            pass
+            log.info("skip_dup_sha", channel=channel, mid=m.id, sha=stored.sha256)
         db.commit()
         log.info("message", channel=channel, mid=m.id)
 

@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     fpv_keywords: str = Field(alias="FPV_KEYWORDS", default="#fpv,#drone")
     fpv_min_confidence: float = Field(alias="FPV_MIN_CONFIDENCE", default=0.3)
 
+    encode_timeout_s: int = Field(alias="ENCODE_TIMEOUT_S", default=120)
+
     crawl_backfill_since: str = Field(alias="CRAWL_BACKFILL_SINCE", default="2024-01-01")
     crawl_queue_maxsize: int = Field(alias="CRAWL_QUEUE_MAXSIZE", default=2000)
     crawl_concurrency: int = Field(alias="CRAWL_CONCURRENCY", default=4)

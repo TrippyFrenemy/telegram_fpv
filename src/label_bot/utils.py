@@ -7,8 +7,8 @@ from src.config import settings
 
 def pick_unlabeled_segment() -> str | None:
     """
-    Возвращает случайный сегмент из S3/segments/,
-    который ещё не размечен в таблице labels.
+    Повертає сегментоване відео з S3/segments/,
+    який не розмічений у бд labels.
     """
     db = SessionLocal()
     try:

@@ -1,3 +1,4 @@
+from sqlalchemy import exists, select
 import typer, asyncio, sys
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -12,6 +13,7 @@ from src.reports.stats import daily_stats
 from src.tg_client.client import client
 from src.crawler.worker import crawl_channel
 from src.utils.split_existing_videos import process_s3
+from src.label_bot.bot import main as run_bot
 
 
 app = typer.Typer(add_help_option=True)
@@ -32,9 +34,11 @@ def init():
 @app.command("add-seeds")
 def add_seeds(file: Path = typer.Option(..., exists=True)):
     db = SessionLocal()
-    for line in file.read_text(encoding="utf-8").splitlines():
+    for line in set(file.read_text(encoding="utf-8").splitlines()):
         u = line.strip()
         if not u:
+            continue
+        if db.execute(select(Channel).where(Channel.username == u)).scalar_one_or_none(): 
             continue
         ch = Channel(username=u) # id оновимо при першому обході
         db.add(ch)
@@ -47,7 +51,7 @@ def add_seeds(file: Path = typer.Option(..., exists=True)):
 def crawl(mode: str = typer.Option("backfill", help="latest|backfill"),
           since: str | None = None):
     async def run():
-        seeds = [s.strip() for s in Path("seeds.txt").read_text(encoding="utf-8").splitlines() if s.strip()]
+        seeds = [s.strip() for s in set(Path("seeds.txt").read_text(encoding="utf-8").splitlines()) if s.strip()]
         backfill_since = None
         if mode == "backfill":
             backfill_since = datetime.fromisoformat(since) if since else datetime.fromisoformat(settings.crawl_backfill_since)
@@ -57,9 +61,14 @@ def crawl(mode: str = typer.Option("backfill", help="latest|backfill"),
 
     asyncio.run(run())
 
-@app.command("labeling")
-def labeling():
+@app.command("partition")
+def partition():
     process_s3()
+
+
+@app.command("bot")
+def bot():
+    asyncio.run(run_bot())
 
 
 @app.command("resume")
