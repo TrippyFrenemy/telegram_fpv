@@ -135,12 +135,9 @@ async def label(cb):
 
 async def main():
     init_db()
-    await notify_all_users("Бот розмітки запущений і готовий до роботи. Він у розробці! Можуть бути баги.")
+    # await notify_all_users("Бот розмітки запущений і готовий до роботи. Він у розробці! Можуть бути баги.")
 
     stop_event = asyncio.Event()
-
-    def handle_stop():
-        stop_event.set()
 
     # перехоплення Ctrl+C і SIGTERM
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -151,7 +148,7 @@ async def main():
     await stop_event.wait()
 
     poller.cancel()
-    await notify_all_users("Бот розмітки вимкнений. ДЯКУЄМО за участь!")
+    # await notify_all_users("Бот розмітки вимкнений. ДЯКУЄМО за участь!")
     await BOT.session.close()
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@
 
 **Ключові можливості**
 
-* Інкрементальний краулінг з чекпойнтами per-channel (`last_scanned_id`), режими: `latest` · `backfill` · `resume`.
+* Інкрементальний краулінг з чекпойнтами per-channel (`last_scanned_id`), режими: `latest` · `backfill`.
 * Рання дедуплікація **до завантаження** за `file_unique_id` + контент-дедуп за SHA-256.
 * Збереження за шаблоном `telegram/{channel}/{yyyy}/{mm}/{sha8}.ext` у S3.
 * Сегментація кожного відео на 5-секундні фрагменти під `segments/…`.
@@ -331,4 +331,6 @@ python -m src.cli.main partition
 
 # 7) (Опційно) Бот для розмітки
 python -m src.cli.main bot
+
+python -m src.ml.frame_classifier_fixed
 ```

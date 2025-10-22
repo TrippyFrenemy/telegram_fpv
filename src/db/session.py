@@ -7,7 +7,6 @@ from src.config import settings
 
 _engine = create_engine(settings.db_dsn, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
-AsyncSessionLocal = async_sessionmaker(bind=_engine, autoflush=False, autocommit=False)
 
 
 def init_db():

@@ -1,0 +1,11 @@
+scikit-learn
+matplotlib
+torch==2.8.0+cu130
+torchaudio==2.8.0+cu130
+torchvision==0.23.0+cu130
+tqdm
+seaborn
+pandas
+numpy
+Pillow
+opencv-python

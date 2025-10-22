@@ -65,8 +65,6 @@ pbs-installer==2025.10.10
 pkginfo==1.12.1.2
 platformdirs==4.5.0
 pluggy==1.6.0
-poetry==2.2.1
-poetry-core==2.2.1
 propcache==0.4.1
 psycopg2-binary==2.9.10
 pyaes==1.6.1
@@ -77,7 +75,6 @@ pydantic==2.11.10
 pydantic-settings==2.6.1
 pydantic_core==2.33.2
 Pygments==2.19.2
-pyproject_hooks==1.2.0
 Pyrogram==2.0.106
 PySocks==1.7.1
 pytest==8.4.2

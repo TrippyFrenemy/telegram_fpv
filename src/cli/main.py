@@ -8,8 +8,6 @@ from datetime import datetime
 from src.config import settings
 from src.db.session import init_db, SessionLocal
 from src.db.models import Channel
-from src.reports.export import export_manifest
-from src.reports.stats import daily_stats
 from src.tg_client.client import client
 from src.crawler.worker import crawl_channel
 from src.utils.split_existing_videos import process_s3
@@ -74,23 +72,6 @@ def bot():
 @app.command("resume")
 def resume():
     crawl()
-
-
-@app.command("export-manifest")
-def export_manifest_cmd(out: Path = typer.Option("manifest.parquet")):
-    db = SessionLocal()
-    p = export_manifest(db, str(out))
-    db.close()
-    print(p)
-
-
-@app.command("stats")
-def stats():
-    db = SessionLocal()
-    rows = daily_stats(db)
-    for r in rows:
-        print(r)
-    db.close()
 
 
 if __name__ == "__main__":
