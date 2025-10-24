@@ -1,22 +1,25 @@
 import re
 from src.db.session import SessionLocal
 from src.db.models import Label
-from src.store.s3 import client as s3
-from src.config import settings
+from src.store.storage_backend import get_storage_backend
 
 
 def cleanup_orphans():
+    """Remove orphaned files from storage that are not referenced in database"""
+    storage = get_storage_backend()
     db = SessionLocal()
+    
     try:
+        # Get all labeled segment paths from database
         labeled = {r[0] for r in db.query(Label.segment_path).all()}
     finally:
         db.close()
 
     # --- 1. Удалить ВСЁ из telegram/ ---
     print("Deleting all telegram/ ...")
-    for obj in s3.list_objects(settings.s3_bucket, prefix="telegram/", recursive=True):
+    for obj in storage.list_objects(prefix="telegram/", recursive=True):
         try:
-            s3.remove_object(settings.s3_bucket, obj.object_name)
+            storage.delete(obj.object_name)
             print(f"[del] {obj.object_name}")
         except Exception as e:
             print(f"[skip] {obj.object_name}: {e}")
@@ -24,28 +27,31 @@ def cleanup_orphans():
     # --- 2. Сегменты ---
     print("Scanning segments/ ...")
     all_segments = [
-        o.object_name for o in s3.list_objects(settings.s3_bucket, prefix="segments/", recursive=True)
+        obj.object_name 
+        for obj in storage.list_objects(prefix="segments/", recursive=True)
     ]
 
-    # Извлекаем базовые имена групп (без _0001.mp4 и т.п.)
-    def base_name(path: str) -> str:
-        m = re.search(r"(.+?)_\d{4}\.mp4$", path)
-        return m.group(1) if m else path
-
-    labeled_bases = {base_name(p) for p in labeled if p.startswith("segments/")}
+    # Extract base group names (without _0001.mp4 etc)
+    labeled_bases = {_extract_base_name(p) for p in labeled if p.startswith("segments/")}
     to_keep = {p for p in all_segments if any(p.startswith(b) for b in labeled_bases)}
 
     deleted = 0
-    for p in all_segments:
-        if p not in to_keep:
+    for path in all_segments:
+        if path not in to_keep:
             try:
-                s3.remove_object(settings.s3_bucket, p)
+                storage.delete(path)
                 deleted += 1
-                print(f"[del] {p}")
+                print(f"[del] {path}")
             except Exception as e:
-                print(f"[skip] {p}: {e}")
+                print(f"[skip] {path}: {e}")
 
     print(f"Total segments deleted: {deleted}")
+
+
+def _extract_base_name(path: str) -> str:
+    """Extract base name from segment path (removes _0001.mp4 suffix)"""
+    match = re.search(r"(.+?)_\d{4}\.mp4$", path)
+    return match.group(1) if match else path
 
 
 if __name__ == "__main__":

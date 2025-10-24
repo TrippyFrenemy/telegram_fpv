@@ -3,67 +3,135 @@ import shutil
 import subprocess
 import tempfile
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable
 from pyrogram.enums import MessageMediaType
 from pyrogram.errors import FloodWait
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from src.extractors.encode import transcode
 from src.crawler.checkpoints import get_last_message_id, set_last_message_id
 from src.tg_client.client import client
 from src.db.session import SessionLocal
 from src.db.models import Channel, Message, Media, Edge, DeadLetter
 from src.extractors.media import ffprobe_info
 from src.store.storage import put, sha256_bytes
-from src.filters.fpv import score
 from src.logger import log
 from src.config import settings
 from src.tg_client.limits import RateLimiter
-from src.utils.split_existing_videos import split_and_upload
-from src.store.s3 import client as s3
+from src.store.redis import _client as redis
 
 HAS_GPU = shutil.which("nvidia-smi") is not None
 print("GPU acceleration is", "enabled" if HAS_GPU else "disabled")
 VIDEO_MEDIA = {MessageMediaType.VIDEO, MessageMediaType.DOCUMENT}
-VIDEO_EXT = {"mp4", "mov", "mkv"}
+VIDEO_EXT = {"mp4", "mov", "mkv", "avi", "wmv", "flv", "webm"}
+
+# Redis ключі для координації з ML воркером
+ML_QUEUE = "fpv:ml_queue"  # Черга шляхів до відео для ML обробки
+ML_PROCESSING = "fpv:processing"  # Set шляхів у процесі обробки
+
+# Глобальний таймер для ротації каналів
+_last_rotation_time = datetime.now()
 
 
-async def crawl_channel(username_or_id: str | int, mode: str = "backfill", backfill_since: datetime | None = None):
+def should_rotate_channel() -> bool:
+    """
+    Перевіряє чи потрібно перейти до наступного каналу.
+    
+    Returns:
+        True якщо пройшов інтервал ротації з config
+    """
+    global _last_rotation_time
+    elapsed = datetime.now() - _last_rotation_time
+    rotation_interval = timedelta(hours=settings.channel_rotation_interval_hours)
+    
+    if elapsed >= rotation_interval:
+        _last_rotation_time = datetime.now()
+        log.info("channel_rotation", reason="time_limit_reached", 
+                 elapsed_hours=elapsed.total_seconds() / 3600)
+        return True
+    return False
+
+
+def publish_to_ml_queue(s3_path: str, sha256: str, duration_s: float) -> None:
+    """
+    Публікує шлях до відео в Redis чергу для ML обробки.
+    
+    Args:
+        s3_path: Шлях до відео в S3
+        sha256: SHA-256 хеш відео
+        duration_s: Тривалість відео в секундах
+    """
+    try:
+        # Зберігаємо метадані про відео для ML воркера
+        task = f"{s3_path}|{sha256}|{duration_s}"
+        redis.rpush(ML_QUEUE, task)
+        log.info("ml_task_published", s3_path=s3_path, queue_length=redis.llen(ML_QUEUE))
+    except Exception as e:
+        log.error("ml_publish_failed", error=str(e), s3_path=s3_path)
+
+
+async def crawl_channel(
+    username_or_id: str | int, 
+    mode: str = "backfill", 
+    backfill_since: datetime | None = None
+):
+    """
+    Обходить канал з підтримкою ротації.
+    
+    Args:
+        username_or_id: Username або ID каналу
+        mode: Режим обходу (backfill/latest)
+        backfill_since: Дата початку для backfill режиму
+    """
     db = SessionLocal()
     try:
-        if isinstance(username_or_id, str):
-            ch = db.execute(select(Channel).where(Channel.username == username_or_id)).scalar_one_or_none()
-        else:
-            ch = db.get(Channel, int(username_or_id))
+        async with client:
+            chat = await client.get_chat(username_or_id)
+            chat_id = chat.id
+
+            last_id = get_last_message_id(db=db, channel_id=chat_id)
+            log.info("crawl_start", channel=username_or_id, last_id=last_id, mode=mode)
+
+            # 1) latest
+            async for m in client.get_chat_history(chat_id, offset_id=0):
+                if should_rotate_channel():
+                    log.info("crawl_interrupted", channel=username_or_id, reason="rotation", last_processed_id=m.id)
+                    return
+                if last_id and m.id <= last_id:
+                    break
+                await handle_message(username_or_id, m)
+                set_last_message_id(db, chat_id, m.id)
+
+            # 2) backfill
+            if mode == "backfill":
+                async for m in client.get_chat_history(chat_id, offset_id=last_id or 0):
+                    if should_rotate_channel():
+                        log.info("crawl_interrupted", channel=username_or_id, reason="rotation", last_processed_id=m.id)
+                        return
+                    if backfill_since and m.date < backfill_since:
+                        break
+                    await handle_message(username_or_id, m)
+                    set_last_message_id(db, chat_id, m.id)
     finally:
         db.close()
 
-    last_id = get_last_message_id(db=db, channel_id=ch.id) if ch else None
-    log.info("crawl_start", channel=username_or_id, last_id=last_id)
-
-    async with client:
-        # 1. --- Обробка нових повідомлень (latest)
-        async for m in client.get_chat_history(username_or_id, offset_id=0):
-            if last_id and m.id <= last_id:
-                break
-            await handle_message(username_or_id, m)
-            set_last_message_id(db, ch.id, m.id)
-
-        # 2. --- Переходимо у backfill (старіші)
-        if mode == "backfill":
-            async for m in client.get_chat_history(ch.id, offset_id=last_id or 0):
-                if backfill_since and m.date < backfill_since:
-                    break
-                await handle_message(username_or_id, m)
-                set_last_message_id(db, ch.id, m.id)
-
 
 async def handle_message(channel, m):
+    """
+    Обробляє окреме повідомлення з каналу.
+    
+    Зміни:
+    - Видалено FPV евристичний фільтр по тексту
+    - Додано публікацію в Redis після успішного збереження
+    
+    Args:
+        channel: Username або ID каналу
+        m: Pyrogram Message об'єкт
+    """
     db = SessionLocal()
     try:
-        # ensure channel rows exist
+        # Забезпечуємо існування рядків каналів
         def ensure_channel(chat):
             ch = db.get(Channel, chat.id)
             if not ch:
@@ -91,7 +159,7 @@ async def handle_message(channel, m):
         text = m.caption or m.text or ""
         has_media = m.media in VIDEO_MEDIA
 
-        # спроба знайти існуюче повідомлення
+        # Перевірка існуючого повідомлення
         existing_msg = db.execute(
             select(Message).where(
                 Message.channel_id == m.chat.id,
@@ -109,7 +177,7 @@ async def handle_message(channel, m):
                 log.info("skip_media_exist", channel=channel, mid=m.id)
                 return
 
-        # створюємо нове повідомлення, якщо не знайшли
+        # Створення нового повідомлення
         if existing_msg:
             msg = existing_msg
         else:
@@ -128,10 +196,10 @@ async def handle_message(channel, m):
 
         if not has_media:
             db.commit()
-            log.info("message", channel=channel, mid=m.id)
+            log.info("message_no_media", channel=channel, mid=m.id)
             return
 
-        # ----- Stage 0: фільтр без завантаження -----
+        # ----- Stage 0: Базова фільтрація без завантаження -----
         file_name = None
         duration = None
         width = height = None
@@ -143,39 +211,32 @@ async def handle_message(channel, m):
             height = getattr(m.video, "height", None)
             tg_uid = getattr(m.video, "file_unique_id", None)
         elif m.document:
-            file_name = m.document.file_name  # інколи відео приходить як document
+            file_name = m.document.file_name
             tg_uid = getattr(m.document, "file_unique_id", None)
         else:
             log.info("skip_no_media", channel=channel, mid=m.id)
+            db.commit()
+            return
 
-        # якщо UID є, пропускаємо дублікат по ньому
+        # Перевірка дубліката по UID
         if tg_uid:
             hit = db.execute(
                 select(Media).where(Media.tg_file_unique_id == tg_uid)
             ).scalar_one_or_none()
             if hit:
                 db.commit()
-                log.info("dup_skip", channel=channel, mid=m.id)
+                log.info("dup_skip_uid", channel=channel, mid=m.id)
                 return
             
-        ext = (file_name.rsplit(".", 1)[-1].lower() if file_name and "." in file_name else None)
+        # Перевірка розширення файлу
+        ext = (file_name.rsplit(".", 1)[-1].lower() 
+               if file_name and "." in file_name else None)
         if ext not in VIDEO_EXT:
             db.commit()
-            log.info("skip_bad_ext", channel=channel, mid=m.id, mime=ext)
+            log.info("skip_bad_ext", channel=channel, mid=m.id, ext=ext)
             return
 
-        prelim = score(text=text, duration_s=duration, width=width, height=height)
-        if prelim.confidence < settings.fpv_min_confidence:
-            db.commit()
-            log.info(
-                "skip_fpv_conf",
-                channel=channel,
-                mid=m.id,
-                conf=prelim.confidence,
-            )
-            return
-
-        # ----- Stage 1: завантаження + точні метадані -----
+        # ----- Stage 1: Завантаження + компресія -----
         file = await m.download(in_memory=True)
         data = file.getbuffer()
 
@@ -187,7 +248,7 @@ async def handle_message(channel, m):
         tmp_out = tmp_in + "_compressed.mp4"
 
         try:
-            # швидке кодування без втрати видимої якості
+            # Швидке кодування
             if HAS_GPU:
                 codec = "h264_nvenc"
                 preset = "fast"
@@ -206,8 +267,9 @@ async def handle_message(channel, m):
             with open(tmp_out, "rb") as f:
                 data = f.read()
             ext = "mp4"
-        except subprocess.CalledProcessError:
-            pass
+        except subprocess.CalledProcessError as e:
+            log.warning("ffmpeg_failed", channel=channel, mid=m.id, error=str(e))
+            # Використовуємо оригінальні дані якщо компресія не вдалась
         finally:
             for p in (tmp_in, tmp_out):
                 try:
@@ -215,18 +277,13 @@ async def handle_message(channel, m):
                 except FileNotFoundError:
                     pass
 
-        # --- Завантаження в S3 або FS ---
+        # ----- Stage 2: Завантаження в S3 -----
         stored = put(data, channel=m.chat.username or m.chat.id, when=m.date, ext=ext)
 
-        # --- Витяг метаданих після компресії ---
+        # Витяг метаданих після компресії
         info = ffprobe_info(str(file.name))
-        dec = score(
-            text=text,
-            duration_s=info.duration_s or duration,
-            width=info.width or width,
-            height=info.height or height,
-        )
 
+        # Збереження в БД
         existing = db.get(Media, stored.sha256)
         if not existing:
             try:
@@ -240,28 +297,34 @@ async def handle_message(channel, m):
                     width=info.width,
                     height=info.height,
                     s3_path=stored.relpath,
-                    fpv_confidence=dec.confidence,
+                    fpv_confidence=None,  # Буде розраховано ML воркером
                 ))
                 db.commit()
+                
+                # Публікація в ML чергу
+                publish_to_ml_queue(
+                    s3_path=stored.relpath,
+                    sha256=stored.sha256,
+                    duration_s=info.duration_s
+                )
+            
+                log.info("message_processed", channel=channel, mid=m.id, 
+                        s3_path=stored.relpath)
+                
             except IntegrityError:
-                db.rollback()  # інший воркер міг вже вставити
+                db.rollback()
+                log.info("skip_dup_sha", channel=channel, mid=m.id, sha=stored.sha256)
         else:
             # дубликат контента — ничего не вставляем в media
             log.info("skip_dup_sha", channel=channel, mid=m.id, sha=stored.sha256)
+            
         db.commit()
-        log.info("message", channel=channel, mid=m.id)
-
-        # # ----- Stage 2: сегментація -----
-        # try:
-        #     threading.Thread(target=split_and_upload, args=(stored.relpath,), daemon=True).start()
-        # except Exception as e:
-        #     log.error("segmentation_failed", err=str(e))
 
     except FloodWait as fw:
         log.warning("flood_wait", seconds=fw.value)
         await asyncio.sleep(fw.value)
     except Exception as e:
-        log.error("dead_letter", err=str(e))
+        log.error("handle_message_failed", channel=channel, mid=m.id, error=str(e))
         db.rollback()
         db.add(DeadLetter(channel_id=m.chat.id, message_id=m.id, error=str(e)))
         db.commit()

@@ -4,6 +4,7 @@ __pycache__/
 .git
 .gitignore
 .env
+.env.docker
 .parquet
 *.mp4
 *.mkv

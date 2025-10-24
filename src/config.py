@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # ML Worker configuration (NEW)
     ml_frames_per_second: int = Field(alias="ML_FRAMES_PER_SECOND", default=2)
     ml_positive_threshold: int = Field(alias="ML_POSITIVE_THRESHOLD", default=3, description="Number of consecutive positive frames (at 2 FPS = 1.5 seconds)")
-    ml_model_path: str = Field(alias="ML_MODEL_PATH", default="models/classifier.pth")
+    ml_model_path: str = Field(alias="ML_MODEL_PATH", default="data/best_model.pt")
     ml_batch_size: int = Field(alias="ML_BATCH_SIZE", default=32)
     ml_num_workers: int = Field(alias="ML_NUM_WORKERS", default=4)
     

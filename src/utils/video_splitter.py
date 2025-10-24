@@ -1,8 +1,20 @@
-import cv2, os
+import cv2
+import os
 from pathlib import Path
 
+
 def split_video(path: str, out_dir: str, segment_s: int = 5) -> list[str]:
-    """Розрізає відео на segment_s секунд і повертає список шляхів сегментів."""
+    """
+    Split video into segments of specified duration.
+    
+    Args:
+        path: Path to input video file
+        out_dir: Output directory for segments
+        segment_s: Segment duration in seconds
+        
+    Returns:
+        List of paths to created segment files
+    """
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {path}")
@@ -44,4 +56,5 @@ def split_video(path: str, out_dir: str, segment_s: int = 5) -> list[str]:
     if writer:
         writer.release()
     cap.release()
+    
     return out_paths

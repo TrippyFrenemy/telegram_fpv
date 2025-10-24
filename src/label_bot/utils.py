@@ -1,24 +1,36 @@
 import random
 from src.db.session import SessionLocal
-from src.db.models import Media, Label
-from src.store.s3 import client as s3
-from src.config import settings
+from src.db.models import Label
+from src.store.storage_backend import get_storage_backend
 
 
 def pick_unlabeled_segment() -> str | None:
     """
-    Повертає сегментоване відео з S3/segments/,
-    який не розмічений у бд labels.
+    Returns a segment from storage that hasn't been labeled yet.
+    
+    Returns:
+        Path to unlabeled segment or None if all labeled
     """
+    storage = get_storage_backend()
+    labeled_paths = _get_labeled_paths()
+    all_segments = _get_all_segments(storage)
+    
+    unlabeled = [p for p in all_segments if p not in labeled_paths]
+    return random.choice(unlabeled) if unlabeled else None
+
+
+def _get_labeled_paths() -> set[str]:
+    """Get set of already labeled segment paths (Single Responsibility)"""
     db = SessionLocal()
     try:
-        labeled = {r[0] for r in db.query(Label.segment_path).all()}
+        return {r[0] for r in db.query(Label.segment_path).all()}
     finally:
         db.close()
 
-    all_segments = [
-        obj.object_name for obj in s3.list_objects(settings.s3_bucket, prefix="segments/", recursive=True)
-    ]
 
-    unlabeled = [p for p in all_segments if p not in labeled]
-    return random.choice(unlabeled) if unlabeled else None
+def _get_all_segments(storage) -> list[str]:
+    """Get list of all segments from storage (Single Responsibility)"""
+    return [
+        obj.name 
+        for obj in storage.list_objects(prefix="segments/", recursive=True)
+    ]
